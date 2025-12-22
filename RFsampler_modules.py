@@ -1,6 +1,7 @@
 from rectified_flow.samplers.base_sampler import Sampler
 import torch
-
+import numpy as np
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class MyEulerSampler(Sampler):
     def __init__(self, **kwargs):
@@ -64,3 +65,27 @@ class MytrueEulerSampler(Sampler):
         
         # Update the state using A_t appied to each sample
         self.x_t =  x_t @ A_t.T +   CENTER_block * self.CENTER
+
+
+
+import numpy as np
+def geom_timegrid_generator(NUM_STEPS, delta):
+    geom_timegrid = np.zeros(NUM_STEPS + 1)
+    h = np.exp(2/(NUM_STEPS-2) * np.log(1/(2 * delta))) - 1.0
+    # First partition [0, 1/2]
+    geom_timegrid[0] = 0
+    geom_timegrid[1] = delta
+    for j in range(2, NUM_STEPS // 2 + 1):
+        geom_timegrid[j] = (1 + h) * geom_timegrid[j - 1]
+
+    # Second partition [1/2, 1]
+    geom_timegrid[NUM_STEPS] = 1.0
+    geom_timegrid[NUM_STEPS - 1] = 1.0 - delta
+    for j in range(NUM_STEPS - 2, NUM_STEPS // 2 - 1, -1):
+        geom_timegrid[j] = 1.0 - (1 + h) * (1.0 - geom_timegrid[j + 1])
+    geom_timegrid = torch.tensor(geom_timegrid, device = device)
+
+    return geom_timegrid
+
+
+lin_timegrid_generator = lambda NUM_STEPS: torch.linspace(0,1 , NUM_STEPS+1).to(device)
