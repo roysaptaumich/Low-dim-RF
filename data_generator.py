@@ -1,5 +1,5 @@
 import numpy as np
-from sklearn.datasets import make_moons
+from sklearn.datasets import make_moons, make_swiss_roll
 import torch
 import torch.distributions as dist
 
@@ -38,7 +38,38 @@ def generate_data(type, n_samples, INPUT_DIM, RANK, CENTER, device = torch.devic
         # 4. Apply the centering/shift (same as your original code)
         D1 = D1_embedded + CENTER
 
- 
+    ####################################
+    # Generate Swiss roll
+    ####################################
+    if type == 'swiss_roll':
+
+        # Swiss roll in R^3
+        X_np, _ = make_swiss_roll(
+            n_samples=n_samples,
+            noise=0.05,
+            random_state=42,
+        )
+
+        # Standardize
+        X_np = X_np - X_np.mean(axis=0)
+        X_np = X_np / X_np.std()
+
+        X = torch.tensor(X_np, dtype=torch.float32, device=device)
+
+        # Scale similarly to the moons experiment
+        X = 3 * X
+
+        # Embed into ambient dimension
+        padding = torch.zeros((n_samples, INPUT_DIM - 3), device=device)
+        D1 = torch.cat((X, padding), dim=1)
+
+        # Random rotation (recommended)
+        G = torch.randn(INPUT_DIM, INPUT_DIM, device=device)
+        Q, _ = torch.linalg.qr(G)
+        D1 = D1 @ Q
+
+        # Global shift
+        D1 = D1 + CENTER
     ####################################
     # Generate Gaussian with low-rank covariance
     # first sample RANK-dim Gaussian

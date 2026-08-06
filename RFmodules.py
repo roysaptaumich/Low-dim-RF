@@ -301,7 +301,24 @@ class VelocityNet(nn.Module):
         x = act(self.fc2(x))
         x = act(self.fc3(x))
         return self.fc_out(x)
+
+class VelocityNet2(nn.Module):
+    def __init__(self, input_dim, h_dim=64):
+        super().__init__()
+        self.fc_in  = nn.Linear(input_dim + 1, h_dim)
+        self.fc2    = nn.Linear(h_dim, h_dim)
+        self.fc3    = nn.Linear(h_dim, h_dim)
+        self.fc_out = nn.Linear(h_dim, input_dim)
     
+    def forward(self, x, t, act=F.gelu):
+        t =  t.squeeze().view(t.shape[0], -1)  # Ensure t has the correct dimensions
+        x = x.view(x.shape[0], -1)
+        x = torch.cat([x, t], dim=1)
+        x = act(self.fc_in(x))
+        x = act(self.fc2(x))
+        x = act(self.fc3(x))
+        x = x/((1-t) + 1e-3)  # Scale the output by 1/(1-t) to enhance stability as t approaches 1
+        return self.fc_out(x)
 
 class MLPVelocity2(nn.Module):
     def __init__(self, dim, hidden_sizes=[128, 128, 128], output_dim=None):
@@ -314,9 +331,98 @@ class MLPVelocity2(nn.Module):
         x = x.view(x.shape[0], -1)
         return self.mlp(torch.cat((x, t), dim=1))
 
+# NON-linear gated velocity structure inspired by the gating mechanism in RNNs, which can help capture complex interactions between time and state
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# -----------------------------
+# Fourier Features Embedding
+# -----------------------------
+class FourierFeatures(nn.Module):
+    def __init__(self, in_dim, num_frequencies=64, scale=10.0):
+        super().__init__()
+        B = torch.randn(in_dim, num_frequencies) * scale
+        self.register_buffer("B", B)
+
+    def forward(self, x):
+        # Ensure x is 2D: (batch_size, in_dim)
+        if x.ndim == 1:
+            x = x.unsqueeze(1)  # (N,) -> (N,1)
+        elif x.ndim > 2:
+            x = x.view(x.shape[0], -1)
+        proj = 2 * torch.pi * x @ self.B  # (batch_size, num_frequencies)
+        return torch.cat([torch.sin(proj), torch.cos(proj)], dim=-1)
 
 
-    
+# -----------------------------
+# Nonlinear Block
+# -----------------------------
+class NonlinearBlock(nn.Module):
+    def __init__(self, x_dim, t_dim, hidden_dim=256, num_freq=64):
+        super().__init__()
+        # Only embedding t here; x is fed directly
+        self.t_embed = FourierFeatures(t_dim, num_freq)
+
+        in_dim = x_dim + 2 * num_freq  # x + Fourier embedding of t
+
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, x_dim),
+        )
+
+    def forward(self, x, t):
+        # Ensure x is 2D
+        if x.ndim > 2:
+            x = x.view(x.shape[0], -1)
+        # Ensure t is 2D
+        if t.ndim == 1:
+            t = t.unsqueeze(1)
+
+        ft = self.t_embed(t)  # (batch_size, 2*num_freq)
+        h = torch.cat([x, ft], dim=-1)
+        return self.net(h)
+
+
+# -----------------------------
+# Nonlinear Gated Velocity
+# -----------------------------
+class NonlinearGatedVelocity(nn.Module):
+    """
+    v(x,t) = v_smooth(x,t) + g(t) * v_stiff(x,t)
+    Fourier embedding for t; handles arbitrary batch size
+    """
+    def __init__(self, d, hidden_dim=512, num_freq=64):
+        super().__init__()
+        self.v_smooth = NonlinearBlock(d, t_dim=1, hidden_dim=hidden_dim, num_freq=num_freq)
+        self.v_stiff  = NonlinearBlock(d, t_dim=1, hidden_dim=hidden_dim, num_freq=num_freq)
+
+        # gating network uses only t
+        self.t_embed = FourierFeatures(1, num_freq)
+        self.gate = nn.Sequential(
+            nn.Linear(2*num_freq, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x, t):
+        # Ensure x and t are 2D
+        if x.ndim > 2:
+            x = x.view(x.shape[0], -1)
+        if t.ndim == 1:
+            t = t.unsqueeze(1)
+
+        g = self.gate(self.t_embed(t))  # (batch_size, 1)
+        v1 = self.v_smooth(x, t)
+        v2 = self.v_stiff(x, t)
+        return v1 + g * v2/(1-t + 1e-3)  # Scale stiff part by 1/(1-t) to enhance stability as t->1
+
+#############
+#############
 class rectified_flow:
     def __init__(self, input_dim = 2, time_steps=2000, tiling = 'uniform',device = device):
         self.input_dim = input_dim
@@ -480,7 +586,7 @@ def rf_trainer(rectified_flow, D0, D1, label = 'loss', batch_size = 1024, num_ep
         idx = torch.randint(0, D0.shape[0], (batch_size,))
         x0_batch = D0[idx]
         x1_batch = D1[idx]
-
+        
         loss = criterion(x0_batch, x1_batch)
 
         optimizer.zero_grad()
